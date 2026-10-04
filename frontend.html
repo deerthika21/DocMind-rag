@@ -380,8 +380,9 @@ async function checkHealth(){
   try{
     const d = await api('/health');
     const dot=$('st-dot'), txt=$('st-txt');
-    if(!d.llm_ready){dot.className='dot err';txt.textContent='Ollama is offline — run: ollama serve';}
+    if(!d.llm_ready){dot.className='dot err';txt.textContent='AI model offline — run: ollama serve, or set GROQ_API_KEY';}
     else{dot.className='dot ok';txt.textContent=d.documents?`Online · ${d.documents} file${d.documents!==1?'s':''} in library`:'Online · attach a file to begin';}
+    $('st-txt').title = d.llm ? `Model: ${d.llm}` : '';
   }catch{$('st-dot').className='dot err';$('st-txt').textContent='Server offline — run: uvicorn api:app --reload';}
 }
 
