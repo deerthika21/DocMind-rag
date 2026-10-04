@@ -1,0 +1,32 @@
+# Virtual environment
+venv/
+.venv/
+
+# Secrets
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Uploaded PDFs
+documents/
+
+# Local databases / vector stores
+db/
+chroma_db/
+embedding_cache/
+
+# Chat database
+chat_history.db
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+database/
+docs/
