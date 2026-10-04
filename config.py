@@ -6,6 +6,13 @@ load_dotenv()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "llama3.2")
 
+# Groq (cloud). When GROQ_API_KEY is set it is used instead of Ollama.
+GROQ_API_KEY    = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL      = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+# Tried in order when the main model hits its per-minute limit
+GROQ_FALLBACK_MODELS = [m.strip() for m in os.getenv(
+    "GROQ_FALLBACK_MODELS", "openai/gpt-oss-20b,qwen/qwen3.8-27b").split(",") if m.strip()]
+
 # Embeddings — 90 MB, fast, no API key needed
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 

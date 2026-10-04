@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import logging
 from uuid import uuid4
 from datetime import datetime
@@ -19,6 +20,9 @@ from langchain_community.vectorstores import Chroma
 from config import (
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    GROQ_FALLBACK_MODELS,
     CHROMA_DIR,
     COLLECTION_NAME,
     CHUNK_SIZE,
@@ -127,6 +131,7 @@ class HealthResponse(BaseModel):
     docs_indexed: int
     documents: int
     llm_ready: bool
+    llm: str = ""
 
 
 class SessionOut(BaseModel):
@@ -269,11 +274,112 @@ def delete_document_chunks(name: str):
     return len(doomed)
 
 # =========================================================
-# OLLAMA
+# LLM: Groq (cloud) when GROQ_API_KEY is set, else local Ollama
 # =========================================================
 
+LLM_NAME = f"Groq · {GROQ_MODEL}" if GROQ_API_KEY else f"Ollama · {OLLAMA_MODEL}"
+
+
+def parse_json(raw: str):
+
+    try:
+        parsed = json.loads(raw)
+        return (parsed if isinstance(parsed, dict) else None), raw
+    except json.JSONDecodeError:
+        return None, raw
+
+
+def groq_json(prompt: str, num_predict: int):
+    """
+    Each Groq model has its own per-minute token allowance (8k TPM on the
+    free tier), so when one is rate-limited the next model is tried; if all
+    are, wait as long as Groq asks (up to 20 s) and retry once.
+    """
+
+    models = [GROQ_MODEL] + [m for m in GROQ_FALLBACK_MODELS if m != GROQ_MODEL]
+    last_error = None
+
+    for attempt in range(2):
+
+        for model in models:
+
+            try:
+                return groq_call(model, prompt, num_predict)
+            except GroqRateLimit as e:
+                logger.warning(f"[LLM] {model} rate-limited, trying next model")
+                last_error = e
+
+        if attempt == 0:
+            wait = min(last_error.retry_after, 20)
+            logger.warning(f"[LLM] All Groq models rate-limited; waiting {wait:.1f}s")
+            time.sleep(wait)
+
+    raise RuntimeError(f"Groq is busy (free-tier rate limit). Please try again in a minute. ({last_error})")
+
+
+class GroqRateLimit(Exception):
+
+    def __init__(self, message, retry_after):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def groq_call(model: str, prompt: str, num_predict: int):
+
+    # gpt-oss models reason before answering; keep that short
+    reasoning = model.startswith("openai/gpt-oss")
+
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the language model for a RAG document assistant. "
+                        "Follow the supplied instructions carefully and return valid JSON only."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            # reasoning tokens count against the output limit
+            "max_completion_tokens": num_predict + (800 if reasoning else 0),
+            "response_format": {"type": "json_object"},
+            **({"reasoning_effort": "low"} if reasoning else {}),
+        },
+        timeout=120,
+    )
+
+    if response.status_code >= 400:
+        try:
+            message = response.json().get("error", {}).get("message", response.text)
+        except ValueError:
+            message = response.text
+
+        if response.status_code == 429:
+            hint = re.search(r"try again in ([\d.]+)s", message)
+            retry_after = float(response.headers.get("retry-after") or (hint.group(1) if hint else 5))
+            raise GroqRateLimit(message, retry_after + 0.5)
+
+        raise RuntimeError(f"Groq API error {response.status_code}: {message}")
+
+    return parse_json(response.json()["choices"][0]["message"]["content"])
+
+
 def ollama_json(prompt: str, num_predict: int = 700):
-    """Ask Ollama for a JSON object. Returns (parsed_or_None, raw_text)."""
+    """
+    Ask the LLM for a JSON object. Returns (parsed_or_None, raw_text).
+    Name kept from the Ollama-only version so callers don't change.
+    """
+
+    if GROQ_API_KEY:
+        return groq_json(prompt, num_predict)
 
     response = requests.post(
         f"{OLLAMA_BASE_URL}/api/generate",
@@ -293,16 +399,13 @@ def ollama_json(prompt: str, num_predict: int = 700):
 
     response.raise_for_status()
 
-    raw = response.json().get("response", "")
-
-    try:
-        parsed = json.loads(raw)
-        return (parsed if isinstance(parsed, dict) else None), raw
-    except json.JSONDecodeError:
-        return None, raw
+    return parse_json(response.json().get("response", ""))
 
 
 def llm_ready():
+
+    if GROQ_API_KEY:
+        return True
 
     try:
         r = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=2)
@@ -725,7 +828,7 @@ def answer_question(question: str, session):
         logger.error(f"[LLM] Error: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Language model unavailable at {OLLAMA_BASE_URL} ({e}). Is Ollama running?"
+            detail=f"Language model unavailable ({LLM_NAME}): {e}"
         )
 
     if parsed is None:
@@ -955,6 +1058,7 @@ def health():
         docs_indexed=docs_count,
         documents=len(list_documents()) if docs_count else 0,
         llm_ready=llm_ready(),
+        llm=LLM_NAME,
     )
 
 # =========================================================
